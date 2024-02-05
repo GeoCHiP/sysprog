@@ -75,12 +75,127 @@ coroutine_func_f(void *context)
 	return 0;
 }
 
+struct vector {
+    int size;
+    int capacity;
+    int *data;
+};
+
+void vector_init(struct vector *v) {
+    v->size = 0;
+    v->capacity = 2;
+    v->data = malloc(v->capacity * sizeof(int));
+}
+
+void vector_push_back(struct vector *v, int number) {
+    if (v->size >= v->capacity) {
+        v->capacity *= 1.5;
+        v->data = realloc(v->data, v->capacity * sizeof(int));
+    }
+    v->data[v->size++] = number;
+}
+
+void vector_shrink_to_fit(struct vector *v) {
+    v->capacity = v->size;
+    v->data = realloc(v->data, v->capacity * sizeof(int));
+}
+
+void vector_destroy(struct vector *v) {
+    free(v->data);
+}
+
+void swap(int *lhs, int *rhs) {
+    int tmp = *lhs;
+    *lhs = *rhs;
+    *rhs = tmp;
+}
+
+int partition(struct vector *v, int l, int r) {
+    unsigned int pivotIndex = l;
+    int pivot = v->data[pivotIndex];
+    swap(&v->data[pivotIndex], &v->data[r]);
+
+    int i = l;
+
+    for (int j = l; j < r; ++j) {
+        if (v->data[j] <= pivot) {
+            swap(&v->data[i], &v->data[j]);
+            i += 1;
+        }
+    }
+
+    swap(&v->data[i], &v->data[r]);
+
+    return i;
+}
+
+void quickSort(struct vector *v, int l, int r) {
+    if (l >= r)
+        return;
+
+    int p = partition(v, l, r);
+
+    quickSort(v, l, p - 1);
+    quickSort(v, p + 1, r);
+}
+
+
+
 int
 main(int argc, char **argv)
 {
 	/* Delete these suppressions when start using the args. */
 	(void)argc;
 	(void)argv;
+
+    ///////////////////////////////////////////////////////////////////
+    // Read
+    int num_files = argc - 1;
+    struct vector *vectors = malloc(num_files * sizeof(struct vector));
+    for (int i = 0; i < num_files; ++i) {
+        FILE *fin = fopen(argv[i + 1], "r");
+        if (!fin) {
+            return -1;
+        }
+
+        vector_init(&vectors[i]);
+        while (!feof(fin)) {
+            int num;
+            fscanf(fin, "%d", &num);
+            vector_push_back(&vectors[i], num);
+        }
+        fclose(fin);
+        vector_shrink_to_fit(&vectors[i]);
+    }
+
+    // Sort
+    for (int i = 0; i < num_files; ++i) {
+        quickSort(&vectors[i], 0, vectors[i].size - 1);
+    }
+
+    // Merge
+    /*int min = vectors[0].data[0];*/
+    /*int *pos = malloc(num_files * sizeof(int));*/
+    /*memset(pos, 0, num_files * sizeof(int));*/
+
+
+
+    // Print
+    for (int i = 0; i < num_files; ++i) {
+        for (int j = 0; j < vectors[i].size; ++j) {
+            printf("%d ", vectors[i].data[j]);
+        }
+        printf("\nEND\n");
+    }
+    printf("\n");
+
+    // Destroy
+    for (int i = 0; i < num_files; ++i) {
+        vector_destroy(&vectors[i]);
+    }
+    free(vectors);
+    ///////////////////////////////////////////////////////////////////
+
 	/* Initialize our coroutine global cooperative scheduler. */
 	coro_sched_init();
 	/* Start several coroutines. */
