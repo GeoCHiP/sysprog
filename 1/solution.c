@@ -35,52 +35,74 @@ partition(struct vector *v, int l, int r)
     return i;
 }
 
+struct my_context {
+    char *name;
+    const char *input_file_path;
+    struct vector *vector;
+    struct timespec timer;
+    struct timespec prev_ts;
+};
+
 static void
-quicksort(struct vector *v, int l, int r)
+stop_timer(struct my_context *ctx)
+{
+    struct timespec current_ts;
+    clock_gettime(CLOCK_MONOTONIC, &current_ts);
+    ctx->timer.tv_sec += current_ts.tv_sec - ctx->prev_ts.tv_sec;
+    ctx->timer.tv_nsec += current_ts.tv_nsec - ctx->prev_ts.tv_nsec;
+}
+
+static void
+start_timer(struct my_context *ctx)
+{
+    clock_gettime(CLOCK_MONOTONIC, &ctx->prev_ts);
+}
+
+static void
+quicksort(struct vector *v, int l, int r, struct my_context *ctx)
 {
     if (l >= r)
         return;
 
     int p = partition(v, l, r);
 
-    quicksort(v, l, p - 1);
-    quicksort(v, p + 1, r);
+    quicksort(v, l, p - 1, ctx);
+    quicksort(v, p + 1, r, ctx);
 
+    stop_timer(ctx);
     coro_yield();
+    start_timer(ctx);
 }
-
-struct my_context {
-	char *name;
-	const char *input_file_path;
-    struct vector *vector;
-};
 
 static struct my_context *
 my_context_new(const char *name, const char *input_file_path, struct vector *vector)
 {
-	struct my_context *ctx = malloc(sizeof(*ctx));
-	ctx->name = strdup(name);
-	ctx->input_file_path = input_file_path;
-	ctx->vector = vector;
-	return ctx;
+    struct my_context *ctx = malloc(sizeof(*ctx));
+    ctx->name = strdup(name);
+    ctx->input_file_path = input_file_path;
+    ctx->vector = vector;
+    memset(&ctx->timer, 0, sizeof(ctx->timer));
+    memset(&ctx->prev_ts, 0, sizeof(ctx->prev_ts));
+    return ctx;
 }
 
 static void
 my_context_delete(struct my_context *ctx)
 {
-	free(ctx->name);
-	free(ctx);
+    free(ctx->name);
+    free(ctx);
 }
 
 static int
 coroutine_func_f(void *context)
 {
-	struct my_context *ctx = context;
-	char *name = ctx->name;
-	const char *input_file_path = ctx->input_file_path;
-	struct vector *vector = ctx->vector;
+    struct my_context *ctx = context;
+    char *name = ctx->name;
+    const char *input_file_path = ctx->input_file_path;
+    struct vector *vector = ctx->vector;
 
-	printf("Started coroutine %s\n", name);
+    printf("%s: started\n", name);
+    start_timer(ctx);
 
     FILE *fin = fopen(input_file_path, "r");
     if (!fin) {
@@ -96,10 +118,14 @@ coroutine_func_f(void *context)
     fclose(fin);
     vector_shrink_to_fit(vector);
 
-    quicksort(vector, 0, vector->size - 1);
+    quicksort(vector, 0, vector->size - 1, ctx);
 
-	my_context_delete(ctx);
-	return 0;
+    stop_timer(ctx);
+
+    printf("%s: work time %ld s %ld ns\n", name, ctx->timer.tv_sec, ctx->timer.tv_nsec);
+
+    my_context_delete(ctx);
+    return 0;
 }
 
 int
@@ -108,22 +134,22 @@ main(int argc, char **argv)
     struct timespec ts1;
     clock_gettime(CLOCK_MONOTONIC, &ts1);
 
-	coro_sched_init();
+    coro_sched_init();
 
     int num_files = argc - 1;
     struct vector *vectors = malloc(num_files * sizeof(struct vector));
-	for (int i = 0; i < num_files; ++i) {
-		char name[16];
-		sprintf(name, "coro_%d", i);
-		coro_new(coroutine_func_f, my_context_new(name, argv[i + 1], &vectors[i]));
-	}
+    for (int i = 0; i < num_files; ++i) {
+        char name[16];
+        sprintf(name, "coro_%d", i);
+        coro_new(coroutine_func_f, my_context_new(name, argv[i + 1], &vectors[i]));
+    }
 
-	struct coro *c;
-	while ((c = coro_sched_wait()) != NULL) {
-		printf("Finished %d\n", coro_status(c));
+    struct coro *c;
+    while ((c = coro_sched_wait()) != NULL) {
+        printf("Finished %d\n", coro_status(c));
         printf("Switch count %lld\n", coro_switch_count(c));
-		coro_delete(c);
-	}
+        coro_delete(c);
+    }
 
     // Merge
     int *pos = malloc(num_files * sizeof(int));
@@ -174,7 +200,7 @@ main(int argc, char **argv)
     struct timespec ts2;
     clock_gettime(CLOCK_MONOTONIC, &ts2);
 
-    printf("Total work time: %ld ns\n", ts2.tv_nsec - ts1.tv_nsec);
+    printf("Total work time: %ld s %ld ns\n", ts2.tv_sec - ts1.tv_sec, ts2.tv_nsec - ts1.tv_nsec);
 
-	return 0;
+    return 0;
 }
