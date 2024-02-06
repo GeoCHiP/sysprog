@@ -41,6 +41,7 @@ struct my_context {
     struct vector *vector;
     struct timespec timer;
     struct timespec prev_ts;
+    long time_slice;
 };
 
 static void
@@ -58,6 +59,16 @@ start_timer(struct my_context *ctx)
     clock_gettime(CLOCK_MONOTONIC, &ctx->prev_ts);
 }
 
+static bool
+is_time_quantum_over(struct my_context *ctx)
+{
+    struct timespec current_ts;
+    clock_gettime(CLOCK_MONOTONIC, &current_ts);
+    long elapsed = (current_ts.tv_sec - ctx->prev_ts.tv_sec) * 1000000000 + (current_ts.tv_nsec - ctx->prev_ts.tv_nsec);
+    elapsed /= 1000;
+    return elapsed >= ctx->time_slice;
+}
+
 static void
 quicksort(struct vector *v, int l, int r, struct my_context *ctx)
 {
@@ -69,13 +80,15 @@ quicksort(struct vector *v, int l, int r, struct my_context *ctx)
     quicksort(v, l, p - 1, ctx);
     quicksort(v, p + 1, r, ctx);
 
-    stop_timer(ctx);
-    coro_yield();
-    start_timer(ctx);
+    if (is_time_quantum_over(ctx)) {
+        stop_timer(ctx);
+        coro_yield();
+        start_timer(ctx);
+    }
 }
 
 static struct my_context *
-my_context_new(const char *name, const char *input_file_path, struct vector *vector)
+my_context_new(const char *name, const char *input_file_path, struct vector *vector, long time_slice)
 {
     struct my_context *ctx = malloc(sizeof(*ctx));
     ctx->name = strdup(name);
@@ -83,6 +96,7 @@ my_context_new(const char *name, const char *input_file_path, struct vector *vec
     ctx->vector = vector;
     memset(&ctx->timer, 0, sizeof(ctx->timer));
     memset(&ctx->prev_ts, 0, sizeof(ctx->prev_ts));
+    ctx->time_slice = time_slice;
     return ctx;
 }
 
@@ -136,12 +150,13 @@ main(int argc, char **argv)
 
     coro_sched_init();
 
-    int num_files = argc - 1;
+    long target_latency = atol(argv[1]);
+    int num_files = argc - 2;
     struct vector *vectors = malloc(num_files * sizeof(struct vector));
     for (int i = 0; i < num_files; ++i) {
         char name[16];
         sprintf(name, "coro_%d", i);
-        coro_new(coroutine_func_f, my_context_new(name, argv[i + 1], &vectors[i]));
+        coro_new(coroutine_func_f, my_context_new(name, argv[i + 2], &vectors[i], target_latency / num_files));
     }
 
     struct coro *c;
