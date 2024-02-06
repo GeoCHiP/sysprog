@@ -37,8 +37,10 @@ partition(struct vector *v, int l, int r)
 
 struct my_context {
     char *name;
-    const char *input_file_path;
-    struct vector *vector;
+    int num_files;
+    char **filepaths;
+    bool *is_file_taken;
+    struct vector *vectors;
     struct timespec timer;
     struct timespec prev_ts;
     long time_slice;
@@ -88,12 +90,14 @@ quicksort(struct vector *v, int l, int r, struct my_context *ctx)
 }
 
 static struct my_context *
-my_context_new(const char *name, const char *input_file_path, struct vector *vector, long time_slice)
+my_context_new(const char *name, int num_files, char **filepaths, bool *is_file_taken, struct vector *vectors, long time_slice)
 {
     struct my_context *ctx = malloc(sizeof(*ctx));
     ctx->name = strdup(name);
-    ctx->input_file_path = input_file_path;
-    ctx->vector = vector;
+    ctx->num_files = num_files;
+    ctx->filepaths = filepaths;
+    ctx->is_file_taken = is_file_taken;
+    ctx->vectors = vectors;
     memset(&ctx->timer, 0, sizeof(ctx->timer));
     memset(&ctx->prev_ts, 0, sizeof(ctx->prev_ts));
     ctx->time_slice = time_slice;
@@ -112,27 +116,46 @@ coroutine_func_f(void *context)
 {
     struct my_context *ctx = context;
     char *name = ctx->name;
-    const char *input_file_path = ctx->input_file_path;
-    struct vector *vector = ctx->vector;
+    int num_files = ctx->num_files;
+    char **filepaths = ctx->filepaths;
+    bool *is_file_taken = ctx->is_file_taken;
+    struct vector *vectors = ctx->vectors;
 
     printf("%s: started\n", name);
     start_timer(ctx);
 
-    FILE *fin = fopen(input_file_path, "r");
-    if (!fin) {
-        return -1;
-    }
+    while (true) {
+        int current_file = 0;
+        bool all_sorted = true;
+        for (int i = 0; i < num_files; ++i) {
+            if (!is_file_taken[i]) {
+                all_sorted = false;
+                current_file = i;
+                is_file_taken[i] = true;
+                break;
+            }
+        }
+        if (all_sorted) {
+            break;
+        }
 
-    vector_init(vector);
-    while (!feof(fin)) {
-        int num;
-        fscanf(fin, "%d", &num);
-        vector_push_back(vector, num);
-    }
-    fclose(fin);
-    vector_shrink_to_fit(vector);
+        FILE *fin = fopen(filepaths[current_file], "r");
+        if (!fin) {
+            printf("%s\n", filepaths[current_file]);
+            return -1;
+        }
 
-    quicksort(vector, 0, vector->size - 1, ctx);
+        vector_init(&vectors[current_file]);
+        while (!feof(fin)) {
+            int num;
+            fscanf(fin, "%d", &num);
+            vector_push_back(&vectors[current_file], num);
+        }
+        fclose(fin);
+        vector_shrink_to_fit(&vectors[current_file]);
+
+        quicksort(&vectors[current_file], 0, vectors[current_file].size - 1, ctx);
+    }
 
     stop_timer(ctx);
 
@@ -151,12 +174,15 @@ main(int argc, char **argv)
     coro_sched_init();
 
     long target_latency = atol(argv[1]);
-    int num_files = argc - 2;
+    long num_coroutines = atol(argv[2]);
+    int num_files = argc - 3;
     struct vector *vectors = malloc(num_files * sizeof(struct vector));
-    for (int i = 0; i < num_files; ++i) {
+    bool *is_file_taken = calloc(num_files, sizeof(bool));
+
+    for (int i = 0; i < num_coroutines; ++i) {
         char name[16];
         sprintf(name, "coro_%d", i);
-        coro_new(coroutine_func_f, my_context_new(name, argv[i + 2], &vectors[i], target_latency / num_files));
+        coro_new(coroutine_func_f, my_context_new(name, num_files, &argv[3], is_file_taken, vectors, target_latency / num_files));
     }
 
     struct coro *c;
@@ -211,6 +237,7 @@ main(int argc, char **argv)
         vector_destroy(&vectors[i]);
     }
     free(vectors);
+    free(is_file_taken);
 
     struct timespec ts2;
     clock_gettime(CLOCK_MONOTONIC, &ts2);
