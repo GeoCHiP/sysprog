@@ -41,7 +41,7 @@ struct my_context {
     char **filepaths;
     bool *is_file_taken;
     struct vector *vectors;
-    struct timespec timer;
+    long timer_nsec;
     struct timespec prev_ts;
     long time_slice;
 };
@@ -51,8 +51,8 @@ stop_timer(struct my_context *ctx)
 {
     struct timespec current_ts;
     clock_gettime(CLOCK_MONOTONIC, &current_ts);
-    ctx->timer.tv_sec += current_ts.tv_sec - ctx->prev_ts.tv_sec;
-    ctx->timer.tv_nsec += current_ts.tv_nsec - ctx->prev_ts.tv_nsec;
+    ctx->timer_nsec += (current_ts.tv_sec - ctx->prev_ts.tv_sec) * 1e9;
+    ctx->timer_nsec += current_ts.tv_nsec - ctx->prev_ts.tv_nsec;
 }
 
 static void
@@ -66,8 +66,7 @@ is_time_quantum_over(struct my_context *ctx)
 {
     struct timespec current_ts;
     clock_gettime(CLOCK_MONOTONIC, &current_ts);
-    long elapsed = (current_ts.tv_sec - ctx->prev_ts.tv_sec) * 1000000000 + (current_ts.tv_nsec - ctx->prev_ts.tv_nsec);
-    elapsed /= 1000;
+    long elapsed = (current_ts.tv_sec - ctx->prev_ts.tv_sec) * 1e9 + (current_ts.tv_nsec - ctx->prev_ts.tv_nsec);
     return elapsed >= ctx->time_slice;
 }
 
@@ -98,7 +97,7 @@ my_context_new(const char *name, int num_files, char **filepaths, bool *is_file_
     ctx->filepaths = filepaths;
     ctx->is_file_taken = is_file_taken;
     ctx->vectors = vectors;
-    memset(&ctx->timer, 0, sizeof(ctx->timer));
+    memset(&ctx->timer_nsec, 0, sizeof(ctx->timer_nsec));
     memset(&ctx->prev_ts, 0, sizeof(ctx->prev_ts));
     ctx->time_slice = time_slice;
     return ctx;
@@ -159,7 +158,7 @@ coroutine_func_f(void *context)
 
     stop_timer(ctx);
 
-    printf("%s: work time %ld s %ld ns\n", name, ctx->timer.tv_sec, ctx->timer.tv_nsec);
+    printf("%s: work time %ld ns\n", name, ctx->timer_nsec);
 
     my_context_delete(ctx);
     return 0;
@@ -173,7 +172,7 @@ main(int argc, char **argv)
 
     coro_sched_init();
 
-    long target_latency = atol(argv[1]);
+    long target_latency = atol(argv[1]) * 1e3;
     long num_coroutines = atol(argv[2]);
     int num_files = argc - 3;
     struct vector *vectors = malloc(num_files * sizeof(struct vector));
@@ -242,7 +241,8 @@ main(int argc, char **argv)
     struct timespec ts2;
     clock_gettime(CLOCK_MONOTONIC, &ts2);
 
-    printf("Total work time: %ld s %ld ns\n", ts2.tv_sec - ts1.tv_sec, ts2.tv_nsec - ts1.tv_nsec);
+    long total_nsec = (ts2.tv_sec - ts1.tv_sec) * 1e9 + ts2.tv_nsec - ts1.tv_nsec;
+    printf("Total work time: %ld ns\n", total_nsec);
 
     return 0;
 }
