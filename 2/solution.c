@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 static void
@@ -23,6 +24,7 @@ execute_command_line(const struct command_line *line)
     } else {
         assert(false);
     }
+
     printf("Expressions:\n");
     const struct expr *e = line->head;
     while (e != NULL) {
@@ -40,6 +42,54 @@ execute_command_line(const struct command_line *line)
         } else {
             assert(false);
         }
+
+        pid_t child_pid = fork();
+        if (child_pid == -1) {
+            perror("fork");
+            exit(EXIT_FAILURE);
+        }
+
+        if (child_pid == 0) {
+            // Close the pipes
+            /*for (size_t j = 0; j < index - 1; ++j) {*/
+                /*close(pipes[j][0]);*/
+                /*close(pipes[j][1]);*/
+            /*}*/
+            /*if (index != 0) {*/
+                /*close(pipes[index - 1][1]);*/
+            /*}*/
+            /*close(pipes[index][0]);*/
+
+            /*pid_t my_pid = getpid();*/
+            /*printf("child_%zu: pid == %d\n", index, my_pid);*/
+
+            // Substitute the stdin fd with the reading end of the pipe
+            /*int new_fd;*/
+            /*if (index != 0) {*/
+                /*new_fd = dup2(pipes[index - 1][0], STDIN_FILENO);*/
+                /*if (new_fd == -1) {*/
+                    /*perror("dup2");*/
+                    /*exit(EXIT_FAILURE);*/
+                /*}*/
+            /*}*/
+
+            // Substitute the stdout fd with the writing end of the pipe
+            /*if (index < num_pipes) {*/
+                /*new_fd = dup2(pipes[index][1], STDOUT_FILENO);*/
+                /*if (new_fd == -1) {*/
+                    /*perror("dup2");*/
+                    /*exit(EXIT_FAILURE);*/
+                /*}*/
+            /*}*/
+
+            char **argv = malloc((e->cmd.arg_count + 1) * sizeof(*argv));
+            argv[0] = e->cmd.exe;
+            for (size_t i = 0; i < e->cmd.arg_count; ++i) {
+                argv[i + 1] = e->cmd.args[i];
+            }
+            execvp(e->cmd.exe, argv);
+        }
+
         e = e->next;
     }
 }
