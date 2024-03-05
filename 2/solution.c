@@ -163,7 +163,39 @@ execute_command_line(struct command_line *line, struct parser *p)
             }
         } else if (e->type == EXPR_TYPE_PIPE) {
         } else if (e->type == EXPR_TYPE_AND) {
+            int wstatus;
+            int exit_status = -1;
+            for (int i = 0; i < num_children; ++i) {
+                waitpid(child_pids[i], &wstatus, 0);
+                exit_status = WEXITSTATUS(wstatus);
+            }
+            if (exit_status != 0) {
+                free(child_pids);
+                for (int i = 0; i < num_pipes; ++i) {
+                    close(pipes[i][0]);
+                    close(pipes[i][1]);
+                }
+                free(pipes);
+                struct execute_cmd_result result = {COMMAND_CONTINUE, exit_status};
+                return result;
+            }
         } else if (e->type == EXPR_TYPE_OR) {
+            int wstatus;
+            int exit_status = -1;
+            for (int i = 0; i < num_children; ++i) {
+                waitpid(child_pids[i], &wstatus, 0);
+                exit_status = WEXITSTATUS(wstatus);
+            }
+            if (exit_status == 0) {
+                free(child_pids);
+                for (int i = 0; i < num_pipes; ++i) {
+                    close(pipes[i][0]);
+                    close(pipes[i][1]);
+                }
+                free(pipes);
+                struct execute_cmd_result result = {COMMAND_CONTINUE, exit_status};
+                return result;
+            }
         } else {
             assert(false);
         }
