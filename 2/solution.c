@@ -156,6 +156,7 @@ execute_command_line(struct command_line *line, struct parser *p)
                 argv[e->cmd.arg_count + 1] = NULL;
                 int err = execvp(e->cmd.exe, argv);
                 if (err == -1) {
+                    free(argv);
                     perror("execvp");
                     exit(EXIT_FAILURE);
                 }
