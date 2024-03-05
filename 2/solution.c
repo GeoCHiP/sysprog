@@ -188,17 +188,53 @@ execute_command_line(struct command_line *line, struct parser *p)
     return result;
 }
 
+struct input_string {
+    char *data;
+    size_t capacity;
+    size_t size;
+};
+
+void input_string_append(struct input_string *in_str, const char *str, size_t num_bytes) {
+    if (in_str->capacity <= in_str->size + num_bytes) {
+        size_t new_capacity = (in_str->capacity + 1) * 2;
+        if (new_capacity < in_str->size + num_bytes) {
+            new_capacity = in_str->size + num_bytes;
+        }
+        in_str->data = realloc(in_str->data, new_capacity * sizeof(*in_str->data));
+        in_str->capacity = new_capacity;
+    } else {
+        assert(in_str->capacity > in_str->size + num_bytes);
+    }
+    memcpy(&in_str->data[in_str->size], str, num_bytes);
+    in_str->size += num_bytes;
+}
+
+void input_string_reset(struct input_string *in_str) {
+    free(in_str->data);
+    in_str->data = NULL;
+    in_str->size = 0;
+    in_str->capacity = 0;
+}
+
 int
 main(void)
 {
     const size_t buf_size = 1024;
     char buf[buf_size];
     int rc;
+    struct input_string input_string = {};
     struct parser *p = parser_new();
+    struct execute_cmd_result result = {COMMAND_EXIT, 2};
 
-    struct execute_cmd_result result = {COMMAND_EXIT, EXIT_FAILURE};
     while ((rc = read(STDIN_FILENO, buf, buf_size)) > 0) {
-        parser_feed(p, buf, rc);
+        input_string_append(&input_string, buf, rc);
+        if ((unsigned long)rc == sizeof(buf) && buf[rc - 1] != '\n') {
+            continue;
+        }
+
+        parser_feed(p, input_string.data, input_string.size);
+        input_string_reset(&input_string);
+
         struct command_line *line = NULL;
         while (true) {
             enum parser_error err = parser_pop_next(p, &line);
