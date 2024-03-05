@@ -224,7 +224,7 @@ main(void)
     int rc;
     struct input_string input_string = {};
     struct parser *p = parser_new();
-    struct execute_cmd_result result = {COMMAND_EXIT, 2};
+    struct execute_cmd_result result = {COMMAND_CONTINUE, 0};
 
     while ((rc = read(STDIN_FILENO, buf, buf_size)) > 0) {
         input_string_append(&input_string, buf, rc);
