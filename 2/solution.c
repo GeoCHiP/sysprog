@@ -20,7 +20,7 @@ struct execute_cmd_result {
 };
 
 static struct execute_cmd_result
-execute_command_line(const struct command_line *line)
+execute_command_line(struct command_line *line, struct parser *p)
 {
     /* REPLACE THIS CODE WITH ACTUAL COMMAND EXECUTION */
 
@@ -94,8 +94,17 @@ execute_command_line(const struct command_line *line)
                 // TODO: fix for && and ||
                 if (strcmp(e->cmd.exe, "exit") == 0) {
                     if (e->cmd.arg_count == 1) {
-                        exit(atoi(e->cmd.args[0]));
+                        free(child_pids);
+                        free(pipes);
+                        int exit_code = atoi(e->cmd.args[0]);
+                        command_line_delete(line);
+                        parser_delete(p);
+                        exit(exit_code);
                     } else {
+                        free(child_pids);
+                        free(pipes);
+                        command_line_delete(line);
+                        parser_delete(p);
                         exit(EXIT_SUCCESS);
                     }
                 }
@@ -199,7 +208,7 @@ main(void)
                 printf("Error: %d\n", (int)err);
                 continue;
             }
-            result = execute_command_line(line);
+            result = execute_command_line(line, p);
             command_line_delete(line);
         }
         if (result.type == COMMAND_EXIT) {
