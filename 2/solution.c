@@ -177,11 +177,13 @@ execute_command_line(struct command_line *line, struct parser *p)
     }
     free(pipes);
 
-    int wstatus;
-    int exit_status = -1;
-    for (int i = 0; i < num_children; ++i) {
-        waitpid(child_pids[i], &wstatus, 0);
-        exit_status = WEXITSTATUS(wstatus);
+    int exit_status = 0;
+    if (!line->is_background) {
+        int wstatus;
+        for (int i = 0; i < num_children; ++i) {
+            waitpid(child_pids[i], &wstatus, 0);
+            exit_status = WEXITSTATUS(wstatus);
+        }
     }
     free(child_pids);
 
