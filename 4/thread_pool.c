@@ -1,5 +1,4 @@
 #include "thread_pool.h"
-#include <assert.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -10,7 +9,8 @@ enum task_state {
 	IS_NEW = 0,
 	IS_PUSHED,
 	IS_RUNNING,
-	IS_FINISHED
+	IS_FINISHED,
+	IS_JOINED,
 };
 
 struct thread_task {
@@ -18,7 +18,7 @@ struct thread_task {
 	void *arg;
 
 	/* PUT HERE OTHER MEMBERS */
-	enum task_state state;
+	_Atomic enum task_state state;
 	void *result;
 	pthread_cond_t cond;
 	pthread_mutex_t mutex;
@@ -84,21 +84,34 @@ thread_pool_runner(void *arg)
 	// TODO: get task from the queue and run it
 	struct thread_pool *pool = arg;
 
-	pthread_mutex_lock(&pool->queue_mutex);
-	while (pool->queue_task_available == false) {
-		pthread_cond_wait(&pool->queue_cond, &pool->queue_mutex);
-	}
-	struct thread_task *task = pool->queue_head;
-	while (task->state != IS_PUSHED) {
-		task = task->next;
-	}
-	task->state = IS_RUNNING;
-	pthread_mutex_unlock(&pool->queue_mutex);
+	while (true) {
+		pthread_mutex_lock(&pool->queue_mutex);
+		while (pool->queue_task_available == false) {
+			pthread_cond_wait(&pool->queue_cond, &pool->queue_mutex);
+		}
+		struct thread_task *task = pool->queue_head;
+		pthread_mutex_lock(&task->mutex);
+		while (task->state != IS_PUSHED) {
+			task = task->next;
+		}
+		task->state = IS_RUNNING;
+		struct thread_task *iter = task->next;
+		while (iter && iter->state != IS_PUSHED) {
+			iter = iter->next;
+		}
+		if (!iter) {
+			pool->queue_task_available = false;
+		}
+		pthread_mutex_unlock(&task->mutex);
+		pthread_mutex_unlock(&pool->queue_mutex);
 
-	task->result = task->function(task->arg);
-	// TODO: maybe use atomic_store?
-	task->state = IS_FINISHED;
-
+		void *result = task->function(task->arg);
+		pthread_mutex_lock(&task->mutex);
+		task->result = result;
+		task->state = IS_FINISHED;
+		pthread_cond_signal(&task->cond);
+		pthread_mutex_unlock(&task->mutex);
+	}
 	// TODO: should be unreachable? wait for join?
 	return NULL;
 }
@@ -116,14 +129,19 @@ thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
 		pool->queue_head = task;
 		pool->queue_tail = task;
 	} else {
+		pthread_mutex_lock(&task->mutex);
 		task->prev = pool->queue_tail;
+		pthread_mutex_unlock(&task->mutex);
 		pool->queue_tail->next = task;
 		pool->queue_tail = task;
 	}
 	pool->queue_size++;
+	pthread_mutex_lock(&task->mutex);
+	task->pool = pool;
 	task->state = IS_PUSHED;
+	pthread_mutex_unlock(&task->mutex);
 	pool->queue_task_available = true;
-	pthread_cond_broadcast(&pool->queue_cond);
+	pthread_cond_signal(&pool->queue_cond);
 	pthread_mutex_unlock(&pool->queue_mutex);
 
 	if (pool->queue_size > pool->threads_capacity
@@ -172,16 +190,20 @@ thread_task_join(struct thread_task *task, void **result)
 		pthread_cond_wait(&task->cond, &task->mutex);
 	}
 	*result = task->result;
-	// Yeeaah, double mutex lock!
 	pthread_mutex_lock(&task->pool->queue_mutex);
 	if (task->prev) {
 		task->prev->next = task->next;
+	} else {
+		task->pool->queue_head = task->next;
 	}
 	if (task->next) {
 		task->next->prev = task->prev;
+	} else {
+		task->pool->queue_tail = task->prev;
 	}
 	task->next = NULL;
 	task->prev = NULL;
+	task->state = IS_JOINED;
 	task->pool->queue_size--;
 	pthread_mutex_unlock(&task->pool->queue_mutex);
 	pthread_mutex_unlock(&task->mutex);
@@ -207,7 +229,7 @@ int
 thread_task_delete(struct thread_task *task)
 {
 	// TODO: check for other states, not only IS_NEW
-	if (task->state != IS_NEW) {
+	if (task->state != IS_NEW && task->state != IS_JOINED) {
 		return TPOOL_ERR_TASK_IN_POOL;
 	}
 	pthread_mutex_destroy(&task->mutex);
