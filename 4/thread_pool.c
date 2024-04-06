@@ -25,8 +25,8 @@ struct thread_task {
 
 	struct thread_pool *pool;
 
-	struct thread_task *next;
 	struct thread_task *prev;
+	struct thread_task *next;
 };
 
 struct thread_pool {
@@ -36,12 +36,18 @@ struct thread_pool {
 	int max_thread_count;
 	int threads_capacity;
 	bool queue_task_available;
+	bool is_deleting;
 
 	struct thread_task *queue_head;
 	struct thread_task *queue_tail;
 	int queue_size;
+	struct thread_task *running_queue_head;
+	struct thread_task *running_queue_tail;
+	int running_queue_size;
 	pthread_cond_t queue_cond;
 	pthread_mutex_t queue_mutex;
+	pthread_cond_t running_queue_cond;
+	pthread_mutex_t running_queue_mutex;
 };
 
 #define handle_error_en(en, msg) \
@@ -72,6 +78,21 @@ int
 thread_pool_delete(struct thread_pool *pool)
 {
 	// TODO: check for active tasks
+	if (pool->running_queue_size != 0) {
+		return TPOOL_ERR_HAS_TASKS;
+	}
+	pthread_mutex_t *queue_mutex = &pool->queue_mutex;
+	pthread_cond_t *queue_cond = &pool->queue_cond;
+
+	pthread_mutex_lock(queue_mutex);
+	pool->is_deleting = true;
+	pthread_cond_broadcast(queue_cond);
+	pthread_mutex_unlock(queue_mutex);
+
+	for (int i = 0; i < pool->threads_capacity; ++i) {
+		pthread_join(pool->threads[i], NULL);
+	}
+
 	pthread_cond_destroy(&pool->queue_cond);
 	pthread_mutex_destroy(&pool->queue_mutex);
 	free(pool);
@@ -83,34 +104,70 @@ thread_pool_runner(void *arg)
 {
 	// TODO: get task from the queue and run it
 	struct thread_pool *pool = arg;
+	pthread_mutex_t *queue_mutex = &pool->queue_mutex;
+	pthread_cond_t *queue_cond = &pool->queue_cond;
+	pthread_mutex_t *running_queue_mutex = &pool->running_queue_mutex;
+	/*pthread_cond_t *running_queue_cond = &pool->running_queue_cond;*/
 
 	while (true) {
-		pthread_mutex_lock(&pool->queue_mutex);
+		pthread_mutex_lock(queue_mutex);
 		while (pool->queue_task_available == false) {
-			pthread_cond_wait(&pool->queue_cond, &pool->queue_mutex);
+			if (pool->is_deleting) {
+				pthread_mutex_unlock(queue_mutex);
+				return NULL;
+			}
+			pthread_cond_wait(queue_cond, queue_mutex);
 		}
 		struct thread_task *task = pool->queue_head;
-		pthread_mutex_lock(&task->mutex);
-		while (task->state != IS_PUSHED) {
-			task = task->next;
+		pool->queue_head = task->next;
+		if (!pool->queue_head) {
+			pool->queue_tail = NULL;
 		}
+		pool->queue_size--;
+
+		pthread_mutex_t *task_mutex = &task->mutex;
+		pthread_cond_t *task_cond = &task->cond;
+
+		pthread_mutex_lock(task_mutex);
+		/*while (task->state != IS_PUSHED) {*/
+			/*task = task->next;*/
+		/*}*/
+		task->next = NULL;
+		task->prev = NULL;
 		task->state = IS_RUNNING;
-		struct thread_task *iter = task->next;
+
+		// Check if no more tasks are available for execution
+		struct thread_task *iter = pool->queue_head;
 		while (iter && iter->state != IS_PUSHED) {
 			iter = iter->next;
 		}
 		if (!iter) {
 			pool->queue_task_available = false;
 		}
-		pthread_mutex_unlock(&task->mutex);
-		pthread_mutex_unlock(&pool->queue_mutex);
+
+		pthread_mutex_unlock(task_mutex);
+		pthread_mutex_unlock(queue_mutex);
+
+		// TODO: extract into a function
+		pthread_mutex_lock(running_queue_mutex);
+		if (pool->running_queue_size == 0) {
+			pool->running_queue_head = task;
+			pool->running_queue_tail = task;
+		} else {
+			task->prev = pool->running_queue_tail;
+			pool->running_queue_tail->next = task;
+			pool->running_queue_tail = task;
+		}
+		pool->running_queue_size++;
+		pthread_mutex_unlock(running_queue_mutex);
 
 		void *result = task->function(task->arg);
-		pthread_mutex_lock(&task->mutex);
+
+		pthread_mutex_lock(task_mutex);
 		task->result = result;
 		task->state = IS_FINISHED;
-		pthread_cond_signal(&task->cond);
-		pthread_mutex_unlock(&task->mutex);
+		pthread_cond_signal(task_cond);
+		pthread_mutex_unlock(task_mutex);
 	}
 	// TODO: should be unreachable? wait for join?
 	return NULL;
@@ -123,26 +180,23 @@ thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
 		return TPOOL_ERR_TOO_MANY_TASKS;
 	}
 
-	pthread_mutex_lock(&pool->queue_mutex);
+	pthread_mutex_t *queue_mutex = &pool->queue_mutex;
+	pthread_cond_t *queue_cond = &pool->queue_cond;
+
+	pthread_mutex_lock(queue_mutex);
 	// TODO: maybe remove queue_size and just check queue_head == NULL?
 	if (pool->queue_size == 0) {
 		pool->queue_head = task;
 		pool->queue_tail = task;
 	} else {
-		pthread_mutex_lock(&task->mutex);
 		task->prev = pool->queue_tail;
-		pthread_mutex_unlock(&task->mutex);
 		pool->queue_tail->next = task;
 		pool->queue_tail = task;
 	}
 	pool->queue_size++;
-	pthread_mutex_lock(&task->mutex);
 	task->pool = pool;
 	task->state = IS_PUSHED;
-	pthread_mutex_unlock(&task->mutex);
 	pool->queue_task_available = true;
-	pthread_cond_signal(&pool->queue_cond);
-	pthread_mutex_unlock(&pool->queue_mutex);
 
 	if (pool->queue_size > pool->threads_capacity
 			&& pool->threads_capacity < pool->max_thread_count) {
@@ -152,6 +206,8 @@ thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
 			handle_error_en(err, "pthread_create");
 		}
 	}
+	pthread_cond_signal(queue_cond);
+	pthread_mutex_unlock(queue_mutex);
 
 	return 0;
 }
@@ -162,6 +218,11 @@ thread_task_new(struct thread_task **task, thread_task_f function, void *arg)
 	*task = malloc(sizeof(**task));
 	(*task)->function = function;
 	(*task)->arg = arg;
+	(*task)->result = NULL;
+	(*task)->state = IS_NEW;
+	(*task)->pool = NULL;
+	(*task)->next = NULL;
+	(*task)->prev = NULL;
 	pthread_cond_init(&(*task)->cond, NULL);
 	pthread_mutex_init(&(*task)->mutex, NULL);
 	return 0;
@@ -185,28 +246,50 @@ thread_task_join(struct thread_task *task, void **result)
 	if (task->state == IS_NEW) {
 		return TPOOL_ERR_TASK_NOT_PUSHED;
 	}
-	pthread_mutex_lock(&task->mutex);
+	pthread_mutex_t *task_mutex = &task->mutex;
+	pthread_cond_t *task_cond = &task->cond;
+	pthread_mutex_t *running_queue_mutex = &task->pool->running_queue_mutex;
+
+	pthread_mutex_lock(task_mutex);
 	while (task->state != IS_FINISHED) {
-		pthread_cond_wait(&task->cond, &task->mutex);
+		pthread_cond_wait(task_cond, task_mutex);
 	}
 	*result = task->result;
-	pthread_mutex_lock(&task->pool->queue_mutex);
+
+	/*pthread_mutex_t *queue_mutex = &task->pool->queue_mutex;*/
+	/*pthread_mutex_lock(queue_mutex);*/
+	/*if (task->prev) {*/
+		/*task->prev->next = task->next;*/
+	/*} else {*/
+		/*task->pool->queue_head = task->next;*/
+	/*}*/
+	/*if (task->next) {*/
+		/*task->next->prev = task->prev;*/
+	/*} else {*/
+		/*task->pool->queue_tail = task->prev;*/
+	/*}*/
+
+	pthread_mutex_lock(running_queue_mutex);
 	if (task->prev) {
 		task->prev->next = task->next;
 	} else {
-		task->pool->queue_head = task->next;
+		task->pool->running_queue_head = task->next;
 	}
 	if (task->next) {
 		task->next->prev = task->prev;
 	} else {
-		task->pool->queue_tail = task->prev;
+		task->pool->running_queue_tail = task->prev;
 	}
+	task->pool->running_queue_size--;
+	pthread_mutex_unlock(running_queue_mutex);
+
 	task->next = NULL;
 	task->prev = NULL;
 	task->state = IS_JOINED;
-	task->pool->queue_size--;
-	pthread_mutex_unlock(&task->pool->queue_mutex);
-	pthread_mutex_unlock(&task->mutex);
+
+	/*task->pool->queue_size--;*/
+	/*pthread_mutex_unlock(queue_mutex);*/
+	pthread_mutex_unlock(task_mutex);
 
 	return 0;
 }
