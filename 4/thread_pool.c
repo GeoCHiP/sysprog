@@ -22,6 +22,7 @@ struct thread_task {
 	/* PUT HERE OTHER MEMBERS */
 	void *result;
 	enum task_state state;
+	bool is_detached;
 
 	pthread_cond_t cond;
 	pthread_mutex_t mutex;
@@ -190,9 +191,15 @@ thread_pool_runner(void *arg)
 
 		pthread_mutex_lock(task_mutex);
 		task->result = result;
-		task->state = IS_FINISHED;
+		task->state = task->is_detached ? IS_JOINED : IS_FINISHED;
 		pthread_cond_signal(&task->cond);
 		pthread_mutex_unlock(task_mutex);
+		if (task->is_detached) {
+			pthread_mutex_lock(running_queue_mutex);
+			queue_remove(&task->pool->running_queue, task);
+			pthread_mutex_unlock(running_queue_mutex);
+			thread_task_delete(task);
+		}
 	}
 	return NULL;
 }
@@ -357,9 +364,28 @@ thread_task_delete(struct thread_task *task)
 int
 thread_task_detach(struct thread_task *task)
 {
-	/* IMPLEMENT THIS FUNCTION */
-	(void)task;
-	return TPOOL_ERR_NOT_IMPLEMENTED;
+	if (task->state == IS_NEW) {
+		return TPOOL_ERR_TASK_NOT_PUSHED;
+	}
+
+	pthread_mutex_t *task_mutex = &task->mutex;
+	pthread_mutex_t *running_queue_mutex = &task->pool->running_queue_mutex;
+	pthread_mutex_lock(task_mutex);
+
+	if (task->state == IS_FINISHED) {
+		pthread_mutex_lock(running_queue_mutex);
+		queue_remove(&task->pool->running_queue, task);
+		pthread_mutex_unlock(running_queue_mutex);
+		task->state = IS_JOINED;
+		pthread_mutex_unlock(task_mutex);
+		thread_task_delete(task);
+		return 0;
+	}
+
+	task->is_detached = true;
+	pthread_mutex_unlock(task_mutex);
+
+	return 0;
 }
 
 #endif
