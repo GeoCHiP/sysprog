@@ -1,9 +1,11 @@
 #include "thread_pool.h"
 #include <errno.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 enum task_state {
 	IS_NEW = 0,
@@ -282,11 +284,58 @@ thread_task_join(struct thread_task *task, void **result)
 int
 thread_task_timed_join(struct thread_task *task, double timeout, void **result)
 {
-	/* IMPLEMENT THIS FUNCTION */
-	(void)task;
-	(void)timeout;
-	(void)result;
-	return TPOOL_ERR_NOT_IMPLEMENTED;
+	if (task->state == IS_NEW) {
+		return TPOOL_ERR_TASK_NOT_PUSHED;
+	}
+	if (timeout < 0) {
+		return TPOOL_ERR_TIMEOUT;
+	}
+
+	pthread_mutex_t *task_mutex = &task->mutex;
+	pthread_cond_t *task_cond = &task->cond;
+	pthread_mutex_t *running_queue_mutex = &task->pool->running_queue_mutex;
+
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	while (timeout > 1.0) {
+		ts.tv_sec += timeout;
+		timeout -= 1.0;
+	}
+	uint64_t nsec = ts.tv_nsec + timeout * 1e9;
+	while (nsec >= 1e9) {
+		ts.tv_sec += 1;
+		nsec -= 1e9;
+	}
+	ts.tv_nsec = nsec;
+
+	int err = pthread_mutex_timedlock(task_mutex, &ts);
+	if (err == ETIMEDOUT) {
+		return TPOOL_ERR_TIMEOUT;
+	}
+	while (task->state != IS_FINISHED) {
+		int err = pthread_cond_timedwait(task_cond, task_mutex, &ts);
+		if (err == ETIMEDOUT) {
+			pthread_mutex_unlock(task_mutex);
+			return TPOOL_ERR_TIMEOUT;
+		}
+	}
+	*result = task->result;
+
+	err = pthread_mutex_timedlock(running_queue_mutex, &ts);
+	if (err == ETIMEDOUT) {
+		pthread_mutex_unlock(task_mutex);
+		return TPOOL_ERR_TIMEOUT;
+	}
+	queue_remove(&task->pool->running_queue, task);
+	pthread_mutex_unlock(running_queue_mutex);
+
+	task->next = NULL;
+	task->prev = NULL;
+	task->state = IS_JOINED;
+
+	pthread_mutex_unlock(task_mutex);
+
+	return 0;
 }
 
 #endif
