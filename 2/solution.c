@@ -48,8 +48,7 @@ execute_command_line(struct command_line *line, struct parser *p)
     }
 
 
-    int (*pipes)[2] = NULL;
-    int num_pipes = 0;
+    int pipes[3][2] = {{-1, -1}, {-1, -1}, {-1, -1}};
 
     pid_t *child_pids = NULL;
     int num_children = 0;
@@ -77,36 +76,10 @@ execute_command_line(struct command_line *line, struct parser *p)
             child_pids = realloc(child_pids, ++num_children * sizeof(*child_pids));
 
             bool is_next_pipe = e->next && e->next->type == EXPR_TYPE_PIPE;
-            int reading_pipe_index = is_next_pipe ? num_pipes - 2 : num_pipes - 1;
 
             if (is_next_pipe) {
-                if (num_pipes > 2) {
-                    int res = close(pipes[num_pipes - 3][0]);
-                    if (res == -1) {
-                        perror("close");
-                        exit(EXIT_FAILURE);
-                    }
-                    res = close(pipes[num_pipes - 3][1]);
-                    if (res == -1) {
-                        perror("close");
-                        exit(EXIT_FAILURE);
-                    }
-                }
-                pipes = realloc(pipes, ++num_pipes * sizeof(*pipes));
-                if (pipe(pipes[num_pipes - 1]) == -1) {
+                if (pipe(pipes[2]) == -1) {
                     perror("pipe");
-                    exit(EXIT_FAILURE);
-                }
-            } else if (num_pipes > 2) {
-                assert(!is_next_pipe);
-                int res = close(pipes[num_pipes - 2][0]);
-                if (res == -1) {
-                    perror("close");
-                    exit(EXIT_FAILURE);
-                }
-                res = close(pipes[num_pipes - 2][1]);
-                if (res == -1) {
-                    perror("close");
                     exit(EXIT_FAILURE);
                 }
             }
@@ -122,75 +95,63 @@ execute_command_line(struct command_line *line, struct parser *p)
                 if (strcmp(e->cmd.exe, "exit") == 0) {
                     if (e->cmd.arg_count == 1) {
                         free(child_pids);
-                        free(pipes);
                         int exit_code = atoi(e->cmd.args[0]);
                         command_line_delete(line);
                         parser_delete(p);
                         exit(exit_code);
                     } else {
                         free(child_pids);
-                        free(pipes);
                         command_line_delete(line);
                         parser_delete(p);
                         exit(EXIT_SUCCESS);
                     }
                 }
 
-                // Close the pipes
-                /*bool is_next_pipe = e->next && e->next->type == EXPR_TYPE_PIPE;*/
-                /*int reading_pipe_index = is_next_pipe ? num_pipes - 2 : num_pipes - 1;*/
-                /*for (int j = num_pipes - 2; j < num_pipes; ++j) {*/
-                    /*if (j != reading_pipe_index && j != num_pipes - 1) {*/
-                        /*int res = close(pipes[j][0]);*/
-                        /*if (res == -1) {*/
-                            /*perror("close 3");*/
-                            /*exit(EXIT_FAILURE);*/
-                        /*}*/
-                        /*res = close(pipes[j][1]);*/
-                        /*if (res == -1) {*/
-                            /*perror("close 4");*/
-                            /*exit(EXIT_FAILURE);*/
-                        /*}*/
-                    /*}*/
-                /*}*/
-
                 // Substitute the stdin fd with the reading end of the pipe
                 if (prev_e && prev_e->type == EXPR_TYPE_PIPE) {
-                    int new_fd = dup2(pipes[reading_pipe_index][0], STDIN_FILENO);
+                    int new_fd = dup2(pipes[1][0], STDIN_FILENO);
                     if (new_fd == -1) {
                         perror("dup2");
                         exit(EXIT_FAILURE);
                     }
-                    int res = close(pipes[reading_pipe_index][0]);
-                    if (res == -1) {
-                        perror("close");
-                        exit(EXIT_FAILURE);
-                    }
-                    res = close(pipes[reading_pipe_index][1]);
-                    if (res == -1) {
-                        perror("close");
-                        exit(EXIT_FAILURE);
+                    for (int i = 0; i < 2; ++i) {
+                        if (pipes[i][0] != -1) {
+                            int res = close(pipes[i][0]);
+                            if (res == -1) {
+                                perror("close");
+                                exit(EXIT_FAILURE);
+                            }
+                            res = close(pipes[i][1]);
+                            if (res == -1) {
+                                perror("close");
+                                exit(EXIT_FAILURE);
+                            }
+                            pipes[i][0] = -1;
+                            pipes[i][1] = -1;
+                        }
                     }
                 }
 
                 // TODO: fix for && and ||
                 // Substitute the stdout fd with the writing end of the pipe
-                if (e->next && e->next->type == EXPR_TYPE_PIPE) {
-                    int new_fd = dup2(pipes[num_pipes - 1][1], STDOUT_FILENO);
+                if (is_next_pipe) {
+                    int new_fd = dup2(pipes[2][1], STDOUT_FILENO);
                     if (new_fd == -1) {
                         perror("dup2");
                         exit(EXIT_FAILURE);
                     }
-                    int res = close(pipes[num_pipes - 1][0]);
+                    int res = close(pipes[2][0]);
                     if (res == -1) {
                         perror("close");
                         exit(EXIT_FAILURE);
                     }
-                    res = close(pipes[num_pipes - 1][1]);
+                    res = close(pipes[2][1]);
                     if (res == -1) {
                         perror("close");
                         exit(EXIT_FAILURE);
                     }
+                    pipes[2][0] = -1;
+                    pipes[2][1] = -1;
                 }
 
                 if (!e->next && (line->out_type == OUTPUT_TYPE_FILE_NEW || line->out_type == OUTPUT_TYPE_FILE_APPEND)) {
@@ -214,18 +175,24 @@ execute_command_line(struct command_line *line, struct parser *p)
                     exit(EXIT_FAILURE);
                 }
             }
-            /*if (created_pipe && num_pipes > 2) {*/
-                /*int res = close(pipes[num_pipes - 3][0]);*/
-                /*if (res == -1) {*/
-                    /*perror("close");*/
-                    /*exit(EXIT_FAILURE);*/
-                /*}*/
-                /*res = close(pipes[num_pipes - 3][1]);*/
-                /*if (res == -1) {*/
-                    /*perror("close");*/
-                    /*exit(EXIT_FAILURE);*/
-                /*}*/
-            /*}*/
+            if (pipes[0][0] != -1) {
+                int res = close(pipes[0][0]);
+                if (res == -1) {
+                    perror("close");
+                    exit(EXIT_FAILURE);
+                }
+                res = close(pipes[0][1]);
+                if (res == -1) {
+                    perror("close");
+                    exit(EXIT_FAILURE);
+                }
+            }
+            pipes[0][0] = pipes[1][0];
+            pipes[0][1] = pipes[1][1];
+            pipes[1][0] = pipes[2][0];
+            pipes[1][1] = pipes[2][1];
+            pipes[2][0] = -1;
+            pipes[2][1] = -1;
         } else if (e->type == EXPR_TYPE_PIPE) {
         } else if (e->type == EXPR_TYPE_AND) {
             int wstatus;
@@ -236,19 +203,18 @@ execute_command_line(struct command_line *line, struct parser *p)
             }
             if (exit_status != 0) {
                 free(child_pids);
-                for (int i = 0; i < num_pipes; ++i) {
-                    int res = close(pipes[i][0]);
-                    if (res == -1) {
-                        perror("close");
-                        exit(EXIT_FAILURE);
-                    }
-                    res = close(pipes[i][1]);
-                    if (res == -1) {
-                        perror("close");
-                        exit(EXIT_FAILURE);
-                    }
-                }
-                free(pipes);
+                /*for (int i = 0; i < num_pipes; ++i) {*/
+                    /*int res = close(pipes[i][0]);*/
+                    /*if (res == -1) {*/
+                        /*perror("close");*/
+                        /*exit(EXIT_FAILURE);*/
+                    /*}*/
+                    /*res = close(pipes[i][1]);*/
+                    /*if (res == -1) {*/
+                        /*perror("close");*/
+                        /*exit(EXIT_FAILURE);*/
+                    /*}*/
+                /*}*/
                 struct execute_cmd_result result = {COMMAND_CONTINUE, exit_status};
                 return result;
             }
@@ -261,19 +227,18 @@ execute_command_line(struct command_line *line, struct parser *p)
             }
             if (exit_status == 0) {
                 free(child_pids);
-                for (int i = 0; i < num_pipes; ++i) {
-                    int res = close(pipes[i][0]);
-                    if (res == -1) {
-                        perror("close");
-                        exit(EXIT_FAILURE);
-                    }
-                    res = close(pipes[i][1]);
-                    if (res == -1) {
-                        perror("close");
-                        exit(EXIT_FAILURE);
-                    }
-                }
-                free(pipes);
+                /*for (int i = 0; i < num_pipes; ++i) {*/
+                    /*int res = close(pipes[i][0]);*/
+                    /*if (res == -1) {*/
+                        /*perror("close");*/
+                        /*exit(EXIT_FAILURE);*/
+                    /*}*/
+                    /*res = close(pipes[i][1]);*/
+                    /*if (res == -1) {*/
+                        /*perror("close");*/
+                        /*exit(EXIT_FAILURE);*/
+                    /*}*/
+                /*}*/
                 struct execute_cmd_result result = {COMMAND_CONTINUE, exit_status};
                 return result;
             }
@@ -284,21 +249,20 @@ execute_command_line(struct command_line *line, struct parser *p)
         e = e->next;
     }
 
-    if (num_pipes > 2) {
-        for (int i = num_pipes - 2; i < num_pipes; ++i) {
-            int res = close(pipes[i][0]);
-            if (res == -1) {
-                perror("close 1");
-                exit(EXIT_FAILURE);
-            }
-            res = close(pipes[i][1]);
-            if (res == -1) {
-                perror("close 2");
-                exit(EXIT_FAILURE);
-            }
+    if (pipes[0][0] != -1) {
+        int res = close(pipes[0][0]);
+        if (res == -1) {
+            perror("close");
+            exit(EXIT_FAILURE);
+        }
+        res = close(pipes[0][1]);
+        if (res == -1) {
+            perror("close");
+            exit(EXIT_FAILURE);
         }
     }
-    free(pipes);
+    pipes[0][0] = -1;
+    pipes[0][1] = -1;
 
     int exit_status = 0;
     if (!line->is_background) {
