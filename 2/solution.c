@@ -19,6 +19,34 @@ struct execute_cmd_result {
     int status;
 };
 
+struct pid_queue {
+    pid_t *data;
+    size_t size;
+    size_t capacity;
+};
+
+void pid_queue_push(struct pid_queue *q, pid_t pid) {
+    if (q->size == q->capacity) {
+        size_t new_capacity = (q->capacity + 1)  * 2;
+        q->data = realloc(q->data, new_capacity * sizeof(*q->data));
+        q->capacity = new_capacity;
+    }
+    q->data[q->size++] = pid;
+}
+
+pid_t pid_queue_pop(struct pid_queue *q) {
+    pid_t temp = q->data[0];
+    for (size_t i = 0; i < q->size - 1; ++i) {
+        q->data[i] = q->data[i + 1];
+    }
+    q->size--;
+    return temp;
+}
+
+void pid_queue_destroy(struct pid_queue *q) {
+    free(q->data);
+}
+
 static struct execute_cmd_result
 execute_command_line(struct command_line *line, struct parser *p)
 {
@@ -50,14 +78,25 @@ execute_command_line(struct command_line *line, struct parser *p)
 
     int pipes[3][2] = {{-1, -1}, {-1, -1}, {-1, -1}};
 
-    pid_t *child_pids = NULL;
-    int num_children = 0;
+    struct pid_queue children_queue = {};
+
+    bool skip_next_command = false;
 
     const struct expr *prev_e = NULL;
 
     const struct expr *e = line->head;
     while (e != NULL) {
         if (e->type == EXPR_TYPE_COMMAND) {
+            if (skip_next_command) {
+                skip_next_command = false;
+                if (e->next && e->next->type == EXPR_TYPE_PIPE) {
+                    skip_next_command = true;
+                }
+                prev_e = e;
+                e = e->next;
+                continue;
+            }
+
             // TODO: fix for && and ||
             if (strcmp(e->cmd.exe, "cd") == 0 && !e->next) {
                 chdir(e->cmd.args[0]);
@@ -73,10 +112,7 @@ execute_command_line(struct command_line *line, struct parser *p)
                 return result;
             }
 
-            child_pids = realloc(child_pids, ++num_children * sizeof(*child_pids));
-
             bool is_next_pipe = e->next && e->next->type == EXPR_TYPE_PIPE;
-
             if (is_next_pipe) {
                 if (pipe(pipes[2]) == -1) {
                     perror("pipe");
@@ -84,23 +120,25 @@ execute_command_line(struct command_line *line, struct parser *p)
                 }
             }
 
-            child_pids[num_children - 1] = fork();
-            if (child_pids[num_children - 1] == -1) {
+            pid_t child_pid = fork();
+            if (child_pid == -1) {
                 perror("fork");
                 exit(EXIT_FAILURE);
             }
 
-            if (child_pids[num_children - 1] == 0) {
+            pid_queue_push(&children_queue, child_pid);
+
+            if (child_pid == 0) {
                 // TODO: fix for && and ||
                 if (strcmp(e->cmd.exe, "exit") == 0) {
                     if (e->cmd.arg_count == 1) {
-                        free(child_pids);
+                        pid_queue_destroy(&children_queue);
                         int exit_code = atoi(e->cmd.args[0]);
                         command_line_delete(line);
                         parser_delete(p);
                         exit(exit_code);
                     } else {
-                        free(child_pids);
+                        pid_queue_destroy(&children_queue);
                         command_line_delete(line);
                         parser_delete(p);
                         exit(EXIT_SUCCESS);
@@ -195,52 +233,58 @@ execute_command_line(struct command_line *line, struct parser *p)
             pipes[2][1] = -1;
         } else if (e->type == EXPR_TYPE_PIPE) {
         } else if (e->type == EXPR_TYPE_AND) {
+            for (int i = 0; i < 3; ++i) {
+                if (pipes[i][0] != -1) {
+                    int res = close(pipes[i][0]);
+                    if (res == -1) {
+                        perror("close");
+                        exit(EXIT_FAILURE);
+                    }
+                    res = close(pipes[i][1]);
+                    if (res == -1) {
+                        perror("close");
+                        exit(EXIT_FAILURE);
+                    }
+                    pipes[i][0] = -1;
+                    pipes[i][1] = -1;
+                }
+            }
             int wstatus;
-            int exit_status = -1;
-            for (int i = 0; i < num_children; ++i) {
-                waitpid(child_pids[i], &wstatus, 0);
+            int exit_status = 0;
+            while (children_queue.size > 0) {
+                pid_t child_pid = pid_queue_pop(&children_queue);
+                waitpid(child_pid, &wstatus, 0);
                 exit_status = WEXITSTATUS(wstatus);
             }
             if (exit_status != 0) {
-                free(child_pids);
-                /*for (int i = 0; i < num_pipes; ++i) {*/
-                    /*int res = close(pipes[i][0]);*/
-                    /*if (res == -1) {*/
-                        /*perror("close");*/
-                        /*exit(EXIT_FAILURE);*/
-                    /*}*/
-                    /*res = close(pipes[i][1]);*/
-                    /*if (res == -1) {*/
-                        /*perror("close");*/
-                        /*exit(EXIT_FAILURE);*/
-                    /*}*/
-                /*}*/
-                struct execute_cmd_result result = {COMMAND_CONTINUE, exit_status};
-                return result;
+                skip_next_command = true;
             }
         } else if (e->type == EXPR_TYPE_OR) {
+            for (int i = 0; i < 3; ++i) {
+                if (pipes[i][0] != -1) {
+                    int res = close(pipes[i][0]);
+                    if (res == -1) {
+                        perror("close");
+                        exit(EXIT_FAILURE);
+                    }
+                    res = close(pipes[i][1]);
+                    if (res == -1) {
+                        perror("close");
+                        exit(EXIT_FAILURE);
+                    }
+                    pipes[i][0] = -1;
+                    pipes[i][1] = -1;
+                }
+            }
             int wstatus;
             int exit_status = -1;
-            for (int i = 0; i < num_children; ++i) {
-                waitpid(child_pids[i], &wstatus, 0);
+            while (children_queue.size > 0) {
+                pid_t child_pid = pid_queue_pop(&children_queue);
+                waitpid(child_pid, &wstatus, 0);
                 exit_status = WEXITSTATUS(wstatus);
             }
             if (exit_status == 0) {
-                free(child_pids);
-                /*for (int i = 0; i < num_pipes; ++i) {*/
-                    /*int res = close(pipes[i][0]);*/
-                    /*if (res == -1) {*/
-                        /*perror("close");*/
-                        /*exit(EXIT_FAILURE);*/
-                    /*}*/
-                    /*res = close(pipes[i][1]);*/
-                    /*if (res == -1) {*/
-                        /*perror("close");*/
-                        /*exit(EXIT_FAILURE);*/
-                    /*}*/
-                /*}*/
-                struct execute_cmd_result result = {COMMAND_CONTINUE, exit_status};
-                return result;
+                skip_next_command = true;
             }
         } else {
             assert(false);
@@ -267,12 +311,13 @@ execute_command_line(struct command_line *line, struct parser *p)
     int exit_status = 0;
     if (!line->is_background) {
         int wstatus;
-        for (int i = 0; i < num_children; ++i) {
-            waitpid(child_pids[i], &wstatus, 0);
+        while (children_queue.size > 0) {
+            pid_t child_pid = pid_queue_pop(&children_queue);
+            waitpid(child_pid, &wstatus, 0);
             exit_status = WEXITSTATUS(wstatus);
         }
     }
-    free(child_pids);
+    pid_queue_destroy(&children_queue);
 
     struct execute_cmd_result result = {COMMAND_CONTINUE, exit_status};
     return result;
