@@ -47,32 +47,49 @@ void pid_queue_destroy(struct pid_queue *q) {
     free(q->data);
 }
 
+void sigchld_handler(int signo) {
+    assert(signo == SIGCHLD);
+    pid_t pid;
+    int status;
+    while ((pid = waitpid(-1, &status, WNOHANG))  > 0) {}
+}
+
 static struct execute_cmd_result
 execute_command_line(struct command_line *line, struct parser *p)
 {
     /* REPLACE THIS CODE WITH ACTUAL COMMAND EXECUTION */
-
     assert(line != NULL);
+
+    if (line->is_background) {
+        struct sigaction sa = {
+            .sa_handler = sigchld_handler,
+            .sa_flags = SA_RESTART | SA_RESETHAND
+        };
+        int err = sigaction(SIGCHLD, &sa, NULL);
+        assert(err != -1);
+
+        pid_t child_pid = fork();
+        assert(child_pid != -1);
+
+        if (child_pid != 0) {
+            struct execute_cmd_result result = {COMMAND_CONTINUE, 0};
+            return result;
+        }
+    }
+
     int output_fd = STDOUT_FILENO;
-    if (line->out_type == OUTPUT_TYPE_STDOUT) {
-    } else if (line->out_type == OUTPUT_TYPE_FILE_NEW) {
-        if (line->out_type == OUTPUT_TYPE_FILE_NEW) {
-            output_fd = open(line->out_file, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-            if (output_fd == -1) {
-                perror("open");
-                exit(EXIT_FAILURE);
-            }
+    if (line->out_type == OUTPUT_TYPE_FILE_NEW) {
+        output_fd = open(line->out_file, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+        if (output_fd == -1) {
+            perror("open");
+            exit(EXIT_FAILURE);
         }
     } else if (line->out_type == OUTPUT_TYPE_FILE_APPEND) {
-        if (line->out_type == OUTPUT_TYPE_FILE_APPEND) {
-            output_fd = open(line->out_file, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-            if (output_fd == -1) {
-                perror("open");
-                exit(EXIT_FAILURE);
-            }
+        output_fd = open(line->out_file, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+        if (output_fd == -1) {
+            perror("open");
+            exit(EXIT_FAILURE);
         }
-    } else {
-        assert(false);
     }
 
 
@@ -309,15 +326,20 @@ execute_command_line(struct command_line *line, struct parser *p)
     pipes[0][1] = -1;
 
     int exit_status = 0;
-    if (!line->is_background) {
-        int wstatus;
-        while (children_queue.size > 0) {
-            pid_t child_pid = pid_queue_pop(&children_queue);
-            waitpid(child_pid, &wstatus, 0);
-            exit_status = WEXITSTATUS(wstatus);
-        }
+    int wstatus;
+    while (children_queue.size > 0) {
+        pid_t child_pid = pid_queue_pop(&children_queue);
+        waitpid(child_pid, &wstatus, 0);
+        exit_status = WEXITSTATUS(wstatus);
     }
+
     pid_queue_destroy(&children_queue);
+
+    if (line->is_background) {
+        command_line_delete(line);
+        parser_delete(p);
+        exit(exit_status);
+    }
 
     struct execute_cmd_result result = {COMMAND_CONTINUE, exit_status};
     return result;
