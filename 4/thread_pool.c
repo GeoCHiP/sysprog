@@ -304,12 +304,12 @@ thread_task_timed_join(struct thread_task *task, double timeout, void **result)
 
 	struct timespec ts;
 	clock_gettime(CLOCK_REALTIME, &ts);
-	while (timeout > 1.0) {
-		ts.tv_sec += timeout;
-		timeout -= 1.0;
-	}
+
+	ts.tv_sec += (time_t)timeout;
+	timeout -= (time_t)timeout;
+
 	uint64_t nsec = ts.tv_nsec + timeout * 1e9;
-	while (nsec >= 1e9) {
+	if (nsec >= 1e9) {
 		ts.tv_sec += 1;
 		nsec -= 1e9;
 	}
