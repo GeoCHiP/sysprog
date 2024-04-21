@@ -45,16 +45,15 @@ struct thread_pool {
 	/* PUT HERE OTHER MEMBERS */
 	int max_thread_count;
 	int threads_capacity;
+	int threads_working;
 
 	bool queue_task_available;
 	bool is_deleting;
 
 	struct task_queue waiting_queue;
-	struct task_queue running_queue;
 
 	pthread_cond_t waiting_queue_cond;
 	pthread_mutex_t waiting_queue_mutex;
-	pthread_mutex_t running_queue_mutex;
 };
 
 void
@@ -126,13 +125,15 @@ thread_pool_thread_count(const struct thread_pool *pool)
 int
 thread_pool_delete(struct thread_pool *pool)
 {
-	if (pool->running_queue.size != 0) {
-		return TPOOL_ERR_HAS_TASKS;
-	}
 	pthread_mutex_t *queue_mutex = &pool->waiting_queue_mutex;
 	pthread_cond_t *queue_cond = &pool->waiting_queue_cond;
-
 	pthread_mutex_lock(queue_mutex);
+
+	if (pool->waiting_queue.size != 0 || pool->threads_working != 0) {
+		pthread_mutex_unlock(queue_mutex);
+		return TPOOL_ERR_HAS_TASKS;
+	}
+
 	pool->is_deleting = true;
 	pthread_cond_broadcast(queue_cond);
 	pthread_mutex_unlock(queue_mutex);
@@ -154,7 +155,6 @@ thread_pool_runner(void *arg)
 	struct thread_pool *pool = arg;
 	pthread_mutex_t *queue_mutex = &pool->waiting_queue_mutex;
 	pthread_cond_t *queue_cond = &pool->waiting_queue_cond;
-	pthread_mutex_t *running_queue_mutex = &pool->running_queue_mutex;
 
 	while (true) {
 		pthread_mutex_lock(queue_mutex);
@@ -167,6 +167,7 @@ thread_pool_runner(void *arg)
 		}
 
 		struct thread_task *task = queue_pop(&pool->waiting_queue);
+		pool->threads_working++;
 
 		// Check if no more tasks are available for execution
 		struct thread_task *iter = pool->waiting_queue.head;
@@ -176,29 +177,27 @@ thread_pool_runner(void *arg)
 		if (!iter) {
 			pool->queue_task_available = false;
 		}
+		pthread_mutex_t *task_mutex = &task->mutex;
+		pthread_mutex_lock(task_mutex);
 		pthread_mutex_unlock(queue_mutex);
 
-		pthread_mutex_t *task_mutex = &task->mutex;
-
-		pthread_mutex_lock(running_queue_mutex);
-		pthread_mutex_lock(task_mutex);
-		queue_push(&pool->running_queue, task);
 		task->state = IS_RUNNING;
 		pthread_mutex_unlock(task_mutex);
-		pthread_mutex_unlock(running_queue_mutex);
 
 		void *result = task->function(task->arg);
+		pthread_mutex_lock(queue_mutex);
+		pool->threads_working--;
+		pthread_mutex_unlock(queue_mutex);
 
 		pthread_mutex_lock(task_mutex);
 		task->result = result;
 		task->state = task->is_detached ? IS_JOINED : IS_FINISHED;
-		pthread_cond_signal(&task->cond);
-		pthread_mutex_unlock(task_mutex);
 		if (task->is_detached) {
-			pthread_mutex_lock(running_queue_mutex);
-			queue_remove(&task->pool->running_queue, task);
-			pthread_mutex_unlock(running_queue_mutex);
+			pthread_mutex_unlock(task_mutex);
 			thread_task_delete(task);
+		} else {
+			pthread_cond_signal(&task->cond);
+			pthread_mutex_unlock(task_mutex);
 		}
 	}
 	return NULL;
@@ -265,17 +264,12 @@ thread_task_join(struct thread_task *task, void **result)
 	}
 	pthread_mutex_t *task_mutex = &task->mutex;
 	pthread_cond_t *task_cond = &task->cond;
-	pthread_mutex_t *running_queue_mutex = &task->pool->running_queue_mutex;
 
 	pthread_mutex_lock(task_mutex);
 	while (task->state != IS_FINISHED) {
 		pthread_cond_wait(task_cond, task_mutex);
 	}
 	*result = task->result;
-
-	pthread_mutex_lock(running_queue_mutex);
-	queue_remove(&task->pool->running_queue, task);
-	pthread_mutex_unlock(running_queue_mutex);
 
 	task->next = NULL;
 	task->prev = NULL;
@@ -300,7 +294,6 @@ thread_task_timed_join(struct thread_task *task, double timeout, void **result)
 
 	pthread_mutex_t *task_mutex = &task->mutex;
 	pthread_cond_t *task_cond = &task->cond;
-	pthread_mutex_t *running_queue_mutex = &task->pool->running_queue_mutex;
 
 	struct timespec ts;
 	clock_gettime(CLOCK_REALTIME, &ts);
@@ -327,14 +320,6 @@ thread_task_timed_join(struct thread_task *task, double timeout, void **result)
 		}
 	}
 	*result = task->result;
-
-	err = pthread_mutex_timedlock(running_queue_mutex, &ts);
-	if (err == ETIMEDOUT) {
-		pthread_mutex_unlock(task_mutex);
-		return TPOOL_ERR_TIMEOUT;
-	}
-	queue_remove(&task->pool->running_queue, task);
-	pthread_mutex_unlock(running_queue_mutex);
 
 	task->next = NULL;
 	task->prev = NULL;
@@ -369,13 +354,9 @@ thread_task_detach(struct thread_task *task)
 	}
 
 	pthread_mutex_t *task_mutex = &task->mutex;
-	pthread_mutex_t *running_queue_mutex = &task->pool->running_queue_mutex;
 	pthread_mutex_lock(task_mutex);
 
 	if (task->state == IS_FINISHED) {
-		pthread_mutex_lock(running_queue_mutex);
-		queue_remove(&task->pool->running_queue, task);
-		pthread_mutex_unlock(running_queue_mutex);
 		task->state = IS_JOINED;
 		pthread_mutex_unlock(task_mutex);
 		thread_task_delete(task);
