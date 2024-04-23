@@ -63,7 +63,7 @@ execute_command_line(struct command_line *line, struct parser *p)
     if (line->is_background) {
         struct sigaction sa = {
             .sa_handler = sigchld_handler,
-            .sa_flags = SA_RESTART | SA_RESETHAND
+            .sa_flags = SA_RESTART
         };
         int err = sigaction(SIGCHLD, &sa, NULL);
         assert(err != -1);
