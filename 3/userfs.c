@@ -60,6 +60,7 @@ struct filedesc {
     /* PUT HERE OTHER MEMBERS */
     struct block *block;
     int offset;
+    int access_mode;
 };
 
 /**
@@ -120,12 +121,25 @@ ufs_open(const char *filename, int flags)
             ufs_error_code = UFS_ERR_NO_FILE;
             return -1;
         }
+        if ((flags & UFS_READ_ONLY) != 0) {
+            ufs_error_code = UFS_ERR_NO_PERMISSION;
+            return -1;
+        }
         current_file = create_file(filename);
     }
 
     struct filedesc *new_file_descriptor = calloc(1, sizeof(*new_file_descriptor));
     new_file_descriptor->file = current_file;
     new_file_descriptor->block = current_file->block_list;
+
+    if ((flags & UFS_READ_ONLY) != 0) {
+        new_file_descriptor->access_mode = UFS_READ_ONLY;
+    } else if ((flags & UFS_WRITE_ONLY) != 0) {
+        new_file_descriptor->access_mode = UFS_WRITE_ONLY;
+    } else {
+        new_file_descriptor->access_mode = UFS_READ_WRITE;
+    }
+
     current_file->refs++;
 
     // Search for available file descriptors
@@ -176,6 +190,11 @@ ufs_write(int fd, const char *buf, size_t size)
     struct filedesc *filedesc = file_descriptors[fd];
     struct file *file = filedesc->file;
 
+    if (filedesc->access_mode == UFS_READ_ONLY) {
+        ufs_error_code = UFS_ERR_NO_PERMISSION;
+        return -1;
+    }
+
     if (file->block_list == NULL) {
         file->block_list = create_block(file);
         filedesc->block = file->block_list;
@@ -217,6 +236,12 @@ ufs_read(int fd, char *buf, size_t size)
     }
 
     struct filedesc *filedesc = file_descriptors[fd];
+
+    if (filedesc->access_mode == UFS_WRITE_ONLY) {
+        ufs_error_code = UFS_ERR_NO_PERMISSION;
+        return -1;
+    }
+
     if (!filedesc->block) {
         // Maybe someone wrote into the file after this
         // descriptor was opened with an empty file
